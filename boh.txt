@@ -1,0 +1,274 @@
+
+'use strict';
+
+/**
+ * SCHEEDA TECNICA
+ * Tipo File        : XML
+ * Residenza        : stato / comune
+ * Trasmissione     : upload manuale
+ * File giornaliero : NO in movimenti possono essere inseriti più giorni (non sembra periodico fisso )
+ * Link guida       : https://www.agenziapugliapromozione.it/portal/documents/10180/4890175/Spot%20online%20specifiche
+ * link esempio     : idem
+ */
+
+/** Modulo per la trasmissione dei dati ISTAT  
+let app = require('../../server.js');
+let moment = require('moment-timezone');
+let ctrv = require('../utility/controlValues');
+let utAnagrafiche = require('../utility/utilityAnagrafiche');
+let utDate = require('../utility/utilityDate');
+let utProperty = require('../utility/utilityProperty');
+let utGuest = require('../utility/utilityGuest');
+let utCheckin = require('../utility/utilityCheckin');
+let utGlobal = require('../utility/utilityGlobal');
+const { create } = require('xmlbuilder2');
+*/
+
+module.exports = class spotPuglia_C {
+    urlPortale = "";
+    ctr = new ctrv
+    ana = new utAnagrafiche
+    dat = new utDate
+    prt = new utProperty
+    gst = new utGuest
+    chk = new utCheckin
+    glb = new utGlobal
+
+
+
+
+    datiProperty
+    numeroStanze = 0
+
+constructor() {
+
+
+}
+/**
+   * E' la funzione che viene richiamata per la trasmissione all'ISTAT delle presenze
+   * @param {*} checkins 
+   * @param {*} path 
+   * @param {*} start 
+   * @param {*} end 
+   * @param {*} property_id 
+   * @param {*} istatHandler 
+   * @returns 
+   */
+ async processSentIstat(checkins,path,start,end,property_id,istatHandler){
+    try {
+
+        this.datiProperty = await this.prt.getDatiProperty(property_id)
+        //console.log("this.datiProperty",JSON.stringify(this.datiProperty));
+    //this.controlloOccupazione_R("2022-07-09",property_id)
+    let result = await this.doTheMath_1(checkins,start,end,property_id,path)
+    
+    //return result
+    } catch (ex) {
+      console.log('An error occured! ' + ex);
+    }
+ }
+ async doTheMath_1(checkins,start,end,property_id,path){
+    let titleLog = 'doTheMath_1'
+    let movimento = {}
+    let listaMovimenti = []
+    let maxDays = 0
+    let departure
+    let partenzaAnticipataCapo = "no"
+    let capo = {}
+
+    if(this.ctr.isFull(checkins)){
+        for (let checkin of checkins) {
+            
+            let guests      = checkin.guests();
+            let arrival     = moment.tz(checkin.from, "Europe/Rome");
+            let dataCK      = this.dat.formattaDataNumber(checkin.from,"YYYYMMDD")
+            let a = {}
+            let g = {}
+            capo = await this.gst.cercaCapo(guests)
+            /**per l'arrivo */
+            if (arrival.isSameOrAfter(start)) {
+                /**Inizializzo un movimento con data */
+                if (!movimento[dataCK]){
+                    movimento[dataCK] = this.movimento()
+                    movimento[dataCK].data = checkin.from
+                    listaMovimenti.push(parseInt(dataCK))
+                }
+               
+                let arr = movimento[dataCK].arrivi
+                let ckID = `ck${checkin.id}_${checkin.accommodationId}`
+                if (!arr[ckID]){arr[ckID] = this.arrivo()}
+                a = arr[ckID]
+                g = capo.guest
+                a.codiceclientesr = g.id
+                a.sesso = g.gender
+                //a.cittadinanza = this.cercaCittadinanza(g.citizenship_id)
+                a.cittadinanza = this.ana.findPlace(g.citizenship_id,"country","code")
+                // Si deve inserire la residenza
+                a.tipologiaalloggiato = capo.codeType
+                a.eta = this.dat.calcolaEta(g.birth)
+                if(!capo.single){
+                
+                    a.componenti = {}
+                    let comp = a.componenti
+                    for (let c of guests) {
+                        if(g.id != c.id){
+                           
+                            comp[`cmp${c.id}`] = this.componente()
+                            let cmp = comp[`cmp${c.id}`]
+                            cmp.codiceclientesr = c.id
+                            cmp.sesso = c.gender
+                            cmp.cittadinanza =  this.ana.findPlace(g.citizenship_id,"country","code")
+
+                            // Si deve inserire la residenza
+                            cmp.eta = this.dat.calcolaEta(c.birth)
+
+                        }
+                                        
+                    }
+                }
+//console.log("movimento data",dataCK,"ARRIVI",movimento[dataCK])
+//console.log("movimento data",dataCK,"ARRIVI componenti",movimento[dataCK].arrivi[ckID].componenti)
+               
+            }
+
+            // controllo il valore massimo del gruppo
+            maxDays = this.gst.controlloPartenza(guests)
+
+            // In ogni caso devo prima registrare il capo
+            departure = arrival.clone().add(capo.guest.days, 'd');
+            if (departure.isSameOrBefore(end) && departure.isSameOrAfter(start)) {
+                let dataPar = this.dat.formattaDataNumber(departure,"YYYYMMDD")
+                    if (!movimento[dataPar]){
+                        movimento[dataPar] =  this.movimento()
+                        movimento[dataPar].data = departure.toDate()
+                        listaMovimenti.push(parseInt(dataPar))
+                    }
+                    let par = movimento[dataPar].partenze
+                    let parID = `par${capo.guest.id}`
+                    if(!capo.single && capo.guest.days < maxDays){
+                        partenzaAnticipataCapo = "si"
+                        par[parID]=[capo.guest.id,partenzaAnticipataCapo]
+                    }else{
+                        partenzaAnticipataCapo = "no"
+                        par[parID]=capo.guest.id
+                    }
+//console.log("movimento data CAPO-----------------------------",dataPar,"PARTENZE componenti",movimento[dataPar].partenze)
+            }
+
+            if(!capo.single){
+                for (let g of guests) {
+                    let daRegistrare
+                    if(partenzaAnticipataCapo == "si"){
+                        daRegistrare = "si"
+                    }else{
+                        if(g.days < maxDays){
+                            daRegistrare = "si"
+                        }else{
+                            daRegistrare = "no"
+                        }
+                    }
+                    if(daRegistrare == "si" && g.id != capo.guest.id){
+                        departure = arrival.clone().add(g.days, 'd');
+                        if (departure.isSameOrBefore(end) && departure.isSameOrAfter(start)) {
+                            let dataPar = this.dat.formattaDataNumber(departure,"YYYYMMDD")
+                            if (!movimento[dataPar]){
+                                movimento[dataPar] =  this.movimento()
+                                movimento[dataPar].data = departure.toDate()
+                                listaMovimenti.push(parseInt(dataPar))
+                            }
+                            let par = movimento[dataPar].partenze
+                            let parID = `par${g.id}`
+                            par[parID]=g.id
+//console.log("movimento data COMPONENTE-----------------------------",dataPar,"PARTENZE componenti",movimento[dataPar].partenze)                            
+                        }
+                    }
+                    
+                }
+            }
+            
+        }
+        
+    }
+listaMovimenti = this.glb.odinaArray(listaMovimenti)
+console.log ("listaMovimenti",listaMovimenti)
+for (let m of listaMovimenti){
+    let mov = movimento[m]
+    mov.datistruttura.camereoccupate = await this.chk[this.datiProperty.nomeFunzioneControllo](mov.data,this.datiProperty)
+    mov.datistruttura.postilettodisponibili = this.datiProperty.dispoLetti
+    mov.datistruttura.cameredisponibili = this.datiProperty.dispoCamere
+
+    console.log ("movimento",movimento[m])
+}
+//console.log ("movimento",movimento)
+//return movimento
+ }
+
+/**Raggruppa tutti i movimenti eseguiti nella giornata raggruppati per stato/provincia */
+movimento(){
+    return {
+        data:"",
+        arrivi:{},
+        partenze:{},
+        datistruttura:{
+            cameredisponibili : 0,
+            postilettodisponibili :0,
+            camereoccupate : 0
+        }
+    }
+}
+
+
+arrivo(){
+    return {
+        codiceclientesr:0,
+        sesso:'',
+        cittadinanza:0,
+        occupazionepostoletto:"si",
+        dayuse:"no",
+        tipologiaalloggiato:0,
+        eta:0
+    }
+}
+
+componente(){
+    return {
+        codiceclientesr:0,
+        sesso:'',
+        cittadinanza:0,
+        occupazionepostoletto:"si",
+        eta:0
+    }
+}
+
+
+
+
+/**Dati della struttura del movimento giornaliero */
+struttra(){
+    return {
+        apertura:true,
+        camereoccupate:0,
+        cameredisponibili:0,
+        lettidisponibili:0
+    }
+}
+
+/**
+ * 
+ * @returns ritorna se la classe può estrarre un prospetto
+ */
+ tableAvailable(){
+    return "NO"
+}
+
+/**
+   * E' un log strutturato
+   * @param {*} radice titolo -> nome della funzione
+   * @param {*} descr corpo del log
+   */
+ cLog = function (radice,descr){
+    console.log(`${radice} - ${descr}`)
+  }
+}
+spotPuglia_C.txt
+Displaying spotPuglia_C.txt.
